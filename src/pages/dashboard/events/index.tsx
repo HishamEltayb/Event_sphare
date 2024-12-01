@@ -6,6 +6,8 @@ import { Card } from '@/components/ui/card';
 import { fetchUserEvents } from '@/services/events';
 import { EventDetails } from './event-details';
 import { AddEventModal } from './add-event-modal';
+import { EventReportModal } from './event-report-modal';
+import { AllEventsReportModal } from './all-events-report-modal';
 
 interface Event {
   id: string;
@@ -25,6 +27,8 @@ export default function EventsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [selectedReportEventId, setSelectedReportEventId] = useState<string | null>(null);
+  const [showAllEventsReport, setShowAllEventsReport] = useState(false);
 
   useEffect(() => {
     async function loadEvents() {
@@ -65,10 +69,19 @@ export default function EventsPage() {
             Manage your events and their suppliers
           </p>
         </div>
-        <Button onClick={() => setIsAddModalOpen(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          Add Event
-        </Button>
+        <div className="flex space-x-4">
+          <Button 
+            onClick={() => setShowAllEventsReport(true)}
+            className="bg-blue-600 hover:bg-blue-700 text-white"
+          >
+            <Calendar className="h-4 w-4 mr-2" />
+            Events Report
+          </Button>
+          <Button onClick={() => setIsAddModalOpen(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            Add Event
+          </Button>
+        </div>
       </div>
 
       <div className="flex space-x-4 mb-6">
@@ -126,6 +139,15 @@ export default function EventsPage() {
                   {event.event_suppliers?.length || 0}
                 </p>
               </div>
+              <Button 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedReportEventId(event.id);
+                }}
+                className="mt-4 w-full bg-green-600 hover:bg-green-700 text-white"
+              >
+                Generate Report
+              </Button>
             </Card>
           ))
         ) : (
@@ -148,6 +170,20 @@ export default function EventsPage() {
         <EventDetails
           eventId={selectedEventId}
           onClose={() => setSelectedEventId(null)}
+        />
+      )}
+
+      {selectedReportEventId && (
+        <EventReportModal
+          event={events.find(e => e.id === selectedReportEventId)}
+          onClose={() => setSelectedReportEventId(null)}
+        />
+      )}
+
+      {showAllEventsReport && (
+        <EventReportModal
+          events={events}
+          onClose={() => setShowAllEventsReport(false)}
         />
       )}
     </div>

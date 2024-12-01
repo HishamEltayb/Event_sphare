@@ -1,18 +1,12 @@
 import { supabase } from '@/lib/supabase';
 import type { Event, EventSupplier, EventDeliverable } from '@/store/event-store';
+import { Document, Paragraph, HeadingLevel, AlignmentType, Packer, TextRun } from 'docx';
+import Together from "together-ai";
 
 export async function fetchUserEvents() {
   const { data: { user } } = await supabase.auth.getUser();
   
-  console.log('Current user:', user);
-  
   if (!user) throw new Error('Not authenticated');
-
-  const { data: allEvents, error: allEventsError } = await supabase
-    .from('events')
-    .select('*');
-    
-  console.log('All events in database:', allEvents);
 
   const { data: events, error } = await supabase
     .from('events')
@@ -27,8 +21,6 @@ export async function fetchUserEvents() {
       )
     `)
     .eq('user_id', user.id);
-
-  console.log('User events query result:', { events, error });
 
   if (error) throw error;
   return events;
@@ -86,9 +78,33 @@ export async function addSupplierToEvent(eventId: string, supplierData: {
         data: {
           role: 'supplier',
           name: supplierData.name
-        }
+        },
+        emailRedirectTo: `${window.location.origin}/supplier/login`
       }
     });
+
+    if (authError) {
+      if (authError.status === 429) {
+        throw new Error('Too many attempts. Please wait a moment and try again.');
+      }
+      console.error('Auth Error:', authError);
+      throw new Error(`Authentication error: ${authError.message}`);
+    }
+
+    if (!authData.user?.id) {
+      throw new Error('No user ID returned from authentication');
+    }
+
+    // Immediately confirm the email using admin API
+    const { error: updateError } = await supabase.auth.admin.updateUserById(
+      authData.user.id,
+      { email_confirm: true }
+    );
+
+    if (updateError) {
+      console.error('Error confirming email:', updateError);
+      throw new Error('Failed to confirm email');
+    }
 
     if (authError) throw authError;
 
@@ -201,4 +217,196 @@ export async function fetchEventDetails(eventId: string) {
 
   if (error) throw error;
   return data;
+}
+
+// 9a05f7cca448c756c082674231530d668446fd00677dd76344d34153e786b3d1
+
+export async function generateEventReport(eventId: string) {
+  try {
+    // 1. Fetch event data from Supabase
+    const { data: event, error } = await supabase
+      .from('events')
+      .select(`
+        *,
+        event_suppliers (
+          id,
+          allocated_budget,
+          status,
+          supplier:suppliers (
+            id,
+            name,
+            email,
+            phone,
+            specialization
+          )
+        )
+      `)
+      .eq('id', eventId)
+      .single();
+
+    if (error) throw error;
+
+    // 2. Format data for AI prompt
+    const prompt = `Please analyze this event data and create a detailed report including the event name, date, suppliers (with their names and contacts), budget, and costs. Format it in clear sections.
+    Use ** ** to mark important information that should be bold in the final report.
+    Use ### to mark section headers.
+    
+    For example:
+    ### Event Overview
+    The event "**${event.name}**" is scheduled for **${event.date}**.
+    
+    Event Data: ${JSON.stringify(event, null, 2)}
+    
+    Please structure the output with these headers:
+    ### Event Overview
+    ### Supplier Details
+    ### Financial Summary
+    `;
+
+    // 3. Process with Together AI - using import.meta.env instead of process.env
+    const together = new Together({ 
+      apiKey: import.meta.env.VITE_TOGETHER_API_KEY 
+    });
+    
+    let reportContent = '';
+
+    const response = await together.chat.completions.create({
+      messages: [{
+        role: "user",
+        content: prompt
+      }],
+      model: "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo",
+      max_tokens: null,
+      temperature: 0.7,
+      top_p: 0.7,
+      top_k: 50,
+      repetition_penalty: 1,
+      stop: ["<|eot_id|>", "<|eom_id|>"],
+      stream: true
+    });
+
+    for await (const token of response) {
+      const content = token.choices[0]?.delta?.content;
+      if (content) {
+        reportContent += content;
+      }
+    }
+    console.log(reportContent);
+
+    // Helper function to check if line is a header
+    const isHeader = (line: string) => line.startsWith('###');
+
+    // Helper function to parse text and create TextRuns with bold sections
+    const createFormattedTextRuns = (text: string) => {
+      const parts = text.split(/(\*\*.*?\*\*)/g);
+      return parts.map(part => {
+        if (part.startsWith('**') && part.endsWith('**')) {
+          // Bold text (remove ** markers)
+          return new TextRun({
+            text: part.slice(2, -2),
+            bold: true,
+            font: "Arial",
+            size: 18,
+          });
+        } else {
+          // Normal text
+          return new TextRun({
+            text: part,
+            bold: false,
+            font: "Arial",
+            size: 18,
+          });
+        }
+      });
+    };
+
+    const doc = new Document({
+      styles: {
+        default: {
+          document: {
+            run: {
+              font: "Arial",
+              size: 28,
+            },
+          },
+        },
+      },
+      sections: [{
+        properties: {},
+        children: [
+          // Header
+          new Paragraph({
+            children: [
+              new TextRun({
+                text: "Supplier Report",
+                bold: true,
+                font: "Arial",
+                size: 40,
+              }),
+            ],
+            heading: HeadingLevel.HEADING_1,
+            alignment: AlignmentType.CENTER,
+            spacing: {
+              after: 400,
+            },
+          }),
+          // Date
+          new Paragraph({
+            children: [
+              new TextRun({
+                text: `Generated on: ${new Date().toLocaleDateString('en-US', {
+                  year: 'numeric',
+                  month: 'long',
+                  day: 'numeric'
+                })}`,
+                bold: false,
+                font: "Arial",
+                size: 28,
+              }),
+            ],
+            alignment: AlignmentType.LEFT,
+            spacing: {
+              after: 400,
+            },
+          }),
+          // AI Generated Content - Process headers and bold text
+          ...reportContent.split('\n').map(line => {
+            if (isHeader(line)) {
+              // Header formatting
+              return new Paragraph({
+                children: [
+                  new TextRun({
+                    text: line.replace('###', '').trim(), // Remove ### and trim whitespace
+                    bold: true,
+                    font: "Arial",
+                    size: 30,
+                  }),
+                ],
+                spacing: {
+                  before: 400,
+                  after: 200,
+                },
+                heading: HeadingLevel.HEADING_2,
+              });
+            } else {
+              // Normal paragraph with bold sections
+              return new Paragraph({
+                children: createFormattedTextRuns(line),
+                spacing: {
+                  after: 200,
+                },
+              });
+            }
+          }),
+        ],
+      }],
+    });
+
+    const blob = await Packer.toBlob(doc);
+    return blob;
+    
+  } catch (error) {
+    console.error('Error generating report:', error);
+    throw new Error('Failed to generate report');
+  }
 } 
